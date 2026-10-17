@@ -1,3 +1,4 @@
+
 import { useEffect, useState } from 'react';
 import { supabase, type EventRow } from '@/lib/supabase';
 import { Sidebar } from '@/components/Sidebar';
@@ -9,7 +10,13 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/Toast';
 import { useAuth } from '@/lib/auth';
-import { Calendar, MapPin, Clock, Users, IndianRupee, Bookmark } from 'lucide-react';
+import {
+  Calendar,
+  MapPin,
+  Clock,
+  Users,
+  IndianRupee,
+} from 'lucide-react';
 
 const SAMPLE_EVENTS: Omit<EventRow, 'organizer_id'>[] = [
   {
@@ -30,7 +37,7 @@ const SAMPLE_EVENTS: Omit<EventRow, 'organizer_id'>[] = [
   {
     id: 's2',
     title: 'IIT Bombay Mood Indigo',
-    description: 'One of India\'s largest college cultural festivals. Looking for performers across categories.',
+    description: "One of India's largest college cultural festivals. Looking for performers across categories.",
     organizer_name: 'IIT Bombay',
     date: '2026-12-18',
     time: '6:00 PM',
@@ -134,9 +141,13 @@ const SAMPLE_EVENTS: Omit<EventRow, 'organizer_id'>[] = [
   },
 ];
 
+const isDatabaseEvent = (id: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
 export function DashboardPage() {
-  const { profile } = useAuth();
+  const { profile, user } = useAuth();
   const { showToast } = useToast();
+
   const [events, setEvents] = useState<EventRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -145,56 +156,194 @@ export function DashboardPage() {
   const [date, setDate] = useState('');
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
   const [applyEvent, setApplyEvent] = useState<EventRow | null>(null);
+  const [savingEvent, setSavingEvent] = useState<string | null>(null);
+  const [submittingApplication, setSubmittingApplication] = useState(false);
 
   useEffect(() => {
-    fetchEvents();
+    void fetchEvents();
   }, []);
 
   const fetchEvents = async () => {
     setLoading(true);
-    const { data } = await supabase.from('events').select('*').order('date', { ascending: true });
-    if (data && data.length > 0) {
+
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .order('date', { ascending: true });
+
+    if (error) {
+      console.error('Failed to load events:', error.message);
+      showToast('error', 'Could not load events from the database.');
+      setEvents([]);
+    } else if (data && data.length > 0) {
       setEvents(data as EventRow[]);
     } else {
+      // Sample events are for display only; they cannot be saved or applied to.
       setEvents(SAMPLE_EVENTS as EventRow[]);
     }
+
     setLoading(false);
   };
 
-  const filtered = events.filter((ev) => {
-    if (search && !ev.title.toLowerCase().includes(search.toLowerCase()) && !ev.organizer_name.toLowerCase().includes(search.toLowerCase())) return false;
-    if (category && ev.talent_category !== category) return false;
-    if (city && ev.city !== city) return false;
-    if (date && ev.date !== date) return false;
+  useEffect(() => {
+    if (!user) {
+      setSavedIds(new Set());
+      return;
+    }
+
+    const fetchSavedEvents = async () => {
+      const { data, error } = await supabase
+        .from('saved_events')
+        .select('event_id')
+        .eq('user_id', user.id);
+
+      if (error) {
+        console.error('Failed to load saved events:', error.message);
+        showToast('error', 'Could not load saved events.');
+        return;
+      }
+
+      setSavedIds(new Set((data ?? []).map((row) => row.event_id)));
+    };
+
+    void fetchSavedEvents();
+  }, [user?.id]);
+
+  const filtered = events.filter((event) => {
+    if (
+      search &&
+      !event.title.toLowerCase().includes(search.toLowerCase()) &&
+      !event.organizer_name.toLowerCase().includes(search.toLowerCase())
+    ) {
+      return false;
+    }
+
+    if (category && event.talent_category !== category) return false;
+    if (city && event.city !== city) return false;
+    if (date && event.date !== date) return false;
+
     return true;
   });
 
   const handleApply = (event: EventRow) => {
+    if (!user) {
+      showToast('error', 'Please log in to apply.');
+      return;
+    }
+
+    if (profile?.role !== 'talent') {
+      showToast('error', 'Only talent accounts can apply to events.');
+      return;
+    }
+
+    if (!isDatabaseEvent(event.id)) {
+      showToast(
+        'info',
+        'This sample event cannot be applied to. Try an event published in the database.'
+      );
+      return;
+    }
+
     setApplyEvent(event);
   };
 
-  const confirmApply = () => {
-    showToast('success', `Applied to ${applyEvent?.title}!`);
+  const confirmApply = async () => {
+    if (!user || !applyEvent || submittingApplication) return;
+
+    setSubmittingApplication(true);
+
+    const { error } = await supabase
+      .from('applications')
+      .insert({
+        user_id: user.id,
+        event_id: applyEvent.id,
+        status: 'pending',
+      });
+
+    setSubmittingApplication(false);
+
+    if (error) {
+      console.error('Application submission failed:', error.message);
+
+      if (error.code === '23505') {
+        showToast('info', 'You have already applied to this event.');
+      } else {
+        showToast('error', 'Could not submit your application. Please try again.');
+      }
+
+      return;
+    }
+
+    showToast('success', `Application submitted for ${applyEvent.title}!`);
     setApplyEvent(null);
   };
 
-  const handleSave = (event: EventRow) => {
-    setSavedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(event.id)) {
-        next.delete(event.id);
-        showToast('info', 'Removed from saved');
-      } else {
-        next.add(event.id);
-        showToast('success', 'Saved to your list');
+  const handleSave = async (event: EventRow) => {
+    if (!user) {
+      showToast('error', 'Please log in to save events.');
+      return;
+    }
+
+    if (!isDatabaseEvent(event.id)) {
+      showToast(
+        'info',
+        'This sample event cannot be saved. Try an event published in the database.'
+      );
+      return;
+    }
+
+    if (savingEvent) return;
+
+    setSavingEvent(event.id);
+
+    if (savedIds.has(event.id)) {
+      const { error } = await supabase
+        .from('saved_events')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('event_id', event.id);
+
+      setSavingEvent(null);
+
+      if (error) {
+        console.error('Removing saved event failed:', error.message);
+        showToast('error', 'Could not remove the saved event.');
+        return;
       }
-      return next;
-    });
+
+      setSavedIds((previous) => {
+        const next = new Set(previous);
+        next.delete(event.id);
+        return next;
+      });
+
+      showToast('info', 'Removed from saved events.');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('saved_events')
+      .insert({
+        user_id: user.id,
+        event_id: event.id,
+      });
+
+    setSavingEvent(null);
+
+    if (error) {
+      console.error('Saving event failed:', error.message);
+      showToast('error', 'Could not save this event. Please try again.');
+      return;
+    }
+
+    setSavedIds((previous) => new Set(previous).add(event.id));
+    showToast('success', 'Event saved successfully!');
   };
 
   return (
     <div className="flex min-h-screen bg-ink-50">
       <Sidebar />
+
       <div className="flex-1 px-5 py-6 sm:px-8">
         <div className="mx-auto max-w-6xl">
           {/* Header */}
@@ -207,9 +356,10 @@ export function DashboardPage() {
             </p>
           </div>
 
-          {/* Search + Filters */}
+          {/* Search and filters */}
           <div className="mb-6 flex flex-col gap-4 rounded-2xl border border-ink-100 bg-white p-4 shadow-card">
             <SearchBar value={search} onChange={setSearch} />
+
             <FilterPanel
               category={category}
               city={city}
@@ -225,9 +375,15 @@ export function DashboardPage() {
             <p className="text-sm font-medium text-ink-500">
               {filtered.length} event{filtered.length !== 1 ? 's' : ''} found
             </p>
+
             {(search || category || city || date) && (
               <button
-                onClick={() => { setSearch(''); setCategory(''); setCity(''); setDate(''); }}
+                onClick={() => {
+                  setSearch('');
+                  setCategory('');
+                  setCity('');
+                  setDate('');
+                }}
                 className="text-sm font-semibold text-accent-600 hover:text-accent-700"
               >
                 Clear filters
@@ -238,15 +394,19 @@ export function DashboardPage() {
           {/* Events grid */}
           {loading ? (
             <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <EventCardSkeleton key={i} />
+              {Array.from({ length: 6 }).map((_, index) => (
+                <EventCardSkeleton key={index} />
               ))}
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-2xl border border-ink-100 bg-white py-20">
               <Calendar className="h-10 w-10 text-ink-300" strokeWidth={1.5} />
-              <p className="mt-4 font-display text-lg font-bold text-ink-900">No events found</p>
-              <p className="mt-1 text-sm text-ink-500">Try adjusting your filters</p>
+              <p className="mt-4 font-display text-lg font-bold text-ink-900">
+                No events found
+              </p>
+              <p className="mt-1 text-sm text-ink-500">
+                Try adjusting your filters
+              </p>
             </div>
           ) : (
             <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -264,17 +424,23 @@ export function DashboardPage() {
         </div>
       </div>
 
-      {/* Apply Modal */}
+      {/* Apply modal */}
       <Modal
         open={!!applyEvent}
-        onClose={() => setApplyEvent(null)}
+        onClose={() => {
+          if (!submittingApplication) setApplyEvent(null);
+        }}
         title="Apply to Event"
       >
         {applyEvent && (
           <div>
             <div className="mb-4">
-              <h4 className="font-display text-lg font-bold text-ink-900">{applyEvent.title}</h4>
-              <p className="text-sm text-ink-500">{applyEvent.organizer_name}</p>
+              <h4 className="font-display text-lg font-bold text-ink-900">
+                {applyEvent.title}
+              </h4>
+              <p className="text-sm text-ink-500">
+                {applyEvent.organizer_name}
+              </p>
             </div>
 
             <div className="space-y-2.5 rounded-xl bg-ink-50 p-4">
@@ -282,18 +448,22 @@ export function DashboardPage() {
                 <Calendar className="h-4 w-4 text-ink-400" />
                 {applyEvent.date}
               </div>
+
               <div className="flex items-center gap-2 text-sm text-ink-600">
                 <Clock className="h-4 w-4 text-ink-400" />
                 {applyEvent.time}
               </div>
+
               <div className="flex items-center gap-2 text-sm text-ink-600">
                 <MapPin className="h-4 w-4 text-ink-400" />
                 {applyEvent.venue}, {applyEvent.city}
               </div>
+
               <div className="flex items-center gap-2 text-sm text-ink-600">
                 <Users className="h-4 w-4 text-ink-400" />
                 {applyEvent.talent_category}
               </div>
+
               <div className="flex items-center gap-2 text-sm font-semibold text-accent-700">
                 <IndianRupee className="h-4 w-4" />
                 {applyEvent.budget}
@@ -305,11 +475,21 @@ export function DashboardPage() {
             </p>
 
             <div className="mt-6 flex gap-3">
-              <Button variant="outline" fullWidth onClick={() => setApplyEvent(null)}>
+              <Button
+                variant="outline"
+                fullWidth
+                disabled={submittingApplication}
+                onClick={() => setApplyEvent(null)}
+              >
                 Cancel
               </Button>
-              <Button fullWidth onClick={confirmApply}>
-                Confirm Application
+
+              <Button
+                fullWidth
+                disabled={submittingApplication}
+                onClick={confirmApply}
+              >
+                {submittingApplication ? 'Submitting...' : 'Confirm Application'}
               </Button>
             </div>
           </div>
